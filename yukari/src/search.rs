@@ -149,6 +149,8 @@ pub struct SearchParams {
     lmr_pv: f32,
     history_bonus_base: f32,
     history_bonus_mul: f32,
+    post_lmr_bonus_base: f32,
+    post_lmr_bonus_mul: f32,
 }
 
 impl Default for SearchParams {
@@ -166,6 +168,8 @@ impl Default for SearchParams {
             lmr_pv: 1.147_785_8,
             history_bonus_base: -201.544_16,
             history_bonus_mul: 299.397_2,
+            post_lmr_bonus_base: -100.0,
+            post_lmr_bonus_mul: 200.0,
         }
     }
 }
@@ -448,17 +452,31 @@ impl Thread {
     fn update_history(
         &mut self, ply: usize, last_last_m: Option<(Piece, Move)>, last_m: Option<(Piece, Move)>, m: Move, bonus: i32,
     ) {
+        self.update_quiet_history(ply, m, bonus);
+        self.update_cont_history(ply, last_last_m, last_m, m, bonus);
+    }
+
+    fn update_quiet_history(
+        &mut self, ply: usize, m: Move, bonus: i32,
+    ) {
         const HISTORY_MAX: i32 = 16384;
         let board = &self.board[ply];
         let bonus = bonus.clamp(-HISTORY_MAX, HISTORY_MAX);
+
         // History Heuristic
-        {
-            let coloured_piece =
-                6 * usize::from(board.side() == Colour::Black) + board.piece_from_square(m.from()).unwrap() as usize;
-            let history = &mut self.history[coloured_piece][m.from().into_inner() as usize][m.dest().into_inner() as usize];
-            let bonus = bonus - i32::from(*history) * bonus.abs() / HISTORY_MAX;
-            *history += bonus as i16;
-        }
+        let coloured_piece =
+            6 * usize::from(board.side() == Colour::Black) + board.piece_from_square(m.from()).unwrap() as usize;
+        let history = &mut self.history[coloured_piece][m.from().into_inner() as usize][m.dest().into_inner() as usize];
+        let bonus = bonus - i32::from(*history) * bonus.abs() / HISTORY_MAX;
+        *history += bonus as i16;
+    }
+
+    fn update_cont_history(
+        &mut self, ply: usize, last_last_m: Option<(Piece, Move)>, last_m: Option<(Piece, Move)>, m: Move, bonus: i32,
+    ) {
+        const HISTORY_MAX: i32 = 16384;
+        let board = &self.board[ply];
+        let bonus = bonus.clamp(-HISTORY_MAX, HISTORY_MAX);
 
         // N-2 Continuation History (Follow Up History)
         if let Some((last_piece, last_m)) = last_last_m {
@@ -751,6 +769,15 @@ impl Thread {
                 score = -self.search(depth - reduction + extension, -alpha - 1, -alpha, ply + 1, tt, None);
                 if score > alpha && score < beta {
                     score = -self.search(depth - 1 + extension, -beta, -alpha, ply + 1, tt, None);
+
+                    if !m.is_capture() && (score <= alpha || score >= beta) {
+                        let mut bonus = self.params.post_lmr_bonus_base;
+                        bonus += depth as f32 * self.params.post_lmr_bonus_mul;
+                        let bonus = if score <= alpha { -bonus as i32 } else { bonus as i32 };
+                        let last_m = *self.path.iter().rev().nth(1).unwrap_or(&None);
+                        let last_last_m = *self.path.iter().rev().nth(2).unwrap_or(&None);
+                        self.update_cont_history(ply, last_last_m, last_m, *m, bonus);
+                    }
                 }
             }
 
